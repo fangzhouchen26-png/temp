@@ -6,7 +6,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from .model import EquivariantVectorHead, apply_transform
+from .model import apply_transform
 
 
 @dataclass(frozen=True)
@@ -36,6 +36,107 @@ class FinePointPairTooLarge(RuntimeError):
         )
         self.pair_elements = int(pair_elements)
         self.limit = int(limit)
+
+
+class EquivariantVectorHead(nn.Module):
+    """Build a conditioned set of equivariant vectors from invariant features.
+
+    The previous head used a positive softmax over the same neighbour set for
+    every channel. Near initialization all channels therefore approximated the
+    same neighbourhood-centroid direction. This implementation removes that
+    shared positive component with zero-mean signed weights and then applies an
+    equivariant symmetric whitening transform across channels.
+
+    The output remains ``(N, C, 3)`` and the parameter names/shapes of
+    ``pair_mlp`` remain checkpoint-compatible with the previous head.
+    """
+
+    def __init__(
+        self,
+        scalar_dim: int,
+        channels: int = 8,
+        hidden_dim: int | None = None,
+        neighbor_k: int = 16,
+        whitening_floor: float = 0.05,
+    ) -> None:
+        super().__init__()
+        if scalar_dim <= 0 or channels < 3 or neighbor_k <= 0:
+            raise ValueError(
+                "scalar_dim and neighbor_k must be positive and channels >= 3"
+            )
+        if not 0.0 < whitening_floor <= 1.0:
+            raise ValueError("whitening_floor must be in (0, 1]")
+        hidden_dim = hidden_dim or max(32, scalar_dim)
+        self.channels = int(channels)
+        self.neighbor_k = int(neighbor_k)
+        self.whitening_floor = float(whitening_floor)
+        self.pair_mlp = nn.Sequential(
+            nn.Linear(2 * scalar_dim + 1, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, channels),
+        )
+
+    def forward(
+        self,
+        points: torch.Tensor,
+        scalar_features: torch.Tensor,
+    ) -> torch.Tensor:
+        if points.ndim != 2 or points.shape[-1] != 3:
+            raise ValueError("points must have shape (N, 3)")
+        if scalar_features.ndim != 2 or scalar_features.shape[0] != len(points):
+            raise ValueError("scalar_features must have shape (N, D)")
+        n = len(points)
+        output = scalar_features.new_zeros(n, self.channels, 3)
+        if n < 3:
+            return output
+
+        geometry = points.float()
+        scalars = scalar_features.float()
+        k = min(self.neighbor_k, n - 1)
+        distances = torch.cdist(geometry, geometry)
+        distances.fill_diagonal_(torch.inf)
+        neighbor_distances, neighbor_indices = distances.topk(
+            k,
+            dim=1,
+            largest=False,
+        )
+        neighbor_points = geometry[neighbor_indices]
+        relative = neighbor_points - geometry[:, None, :]
+        neighbor_scalars = scalars[neighbor_indices]
+        center_scalars = scalars[:, None, :].expand(-1, k, -1)
+        pair_input = torch.cat(
+            [center_scalars, neighbor_scalars, neighbor_distances.unsqueeze(-1)],
+            dim=-1,
+        )
+        logits = self.pair_mlp(pair_input)
+
+        # Signed, zero-sum weights remove the common neighbourhood-centroid
+        # component that caused all channels to align at initialization.
+        weights = logits - logits.mean(dim=1, keepdim=True)
+        weight_norm = weights.square().sum(dim=1, keepdim=True).sqrt()
+        weights = weights / weight_norm.clamp_min(1e-6)
+        vectors = torch.einsum("nkc,nkd->ncd", weights, relative)
+        vectors = vectors - vectors.mean(dim=1, keepdim=True)
+
+        # Symmetric inverse-square-root whitening is rotation equivariant:
+        # V -> V R^T implies Cov -> R Cov R^T and Vw -> Vw R^T.
+        covariance = vectors.transpose(-1, -2) @ vectors
+        covariance = covariance / float(self.channels)
+        eigenvalues, eigenvectors = torch.linalg.eigh(covariance.float())
+        largest = eigenvalues[..., -1:].clamp_min(1e-8)
+        regularized = torch.maximum(
+            eigenvalues,
+            self.whitening_floor * largest,
+        )
+        inverse_sqrt = (
+            eigenvectors
+            @ torch.diag_embed(regularized.rsqrt())
+            @ eigenvectors.transpose(-1, -2)
+        )
+        vectors = vectors.float() @ inverse_sqrt
+        vectors = F.normalize(vectors, dim=-1, eps=1e-6)
+        return vectors.to(scalar_features.dtype)
 
 
 def make_gt_point_pairs(
@@ -144,13 +245,64 @@ def bidirectional_matchability_loss(
     return 0.5 * (source_loss + target_loss)
 
 
+def equivariant_channel_conditioning_loss(
+    vectors: torch.Tensor,
+    point_mask: torch.Tensor | None = None,
+) -> torch.Tensor:
+    """Penalize rank-deficient channel sets without pairwise orthogonality.
+
+    For unit vectors the ideal second-moment matrix is I/3. This permits any
+    number of channels while requiring the set to span all three dimensions.
+    """
+    if vectors.ndim != 3 or vectors.shape[-1] != 3:
+        raise ValueError("vectors must have shape (N, C, 3)")
+    if vectors.shape[1] < 3:
+        raise ValueError("at least three vector channels are required")
+    if point_mask is not None:
+        if point_mask.shape != (len(vectors),):
+            raise ValueError("point_mask must have shape (N,)")
+        vectors = vectors[point_mask]
+    if len(vectors) == 0:
+        return vectors.new_zeros(())
+    normalized = F.normalize(vectors.float(), dim=-1, eps=1e-6)
+    covariance = normalized.transpose(-1, -2) @ normalized
+    covariance = covariance / float(vectors.shape[1])
+    target = torch.eye(3, dtype=covariance.dtype, device=covariance.device) / 3.0
+    return (covariance - target).square().sum(dim=(-1, -2)).mean().to(vectors.dtype)
+
+
+def _best_positive_alignment_loss(
+    source_vectors: torch.Tensor,
+    target_vectors: torch.Tensor,
+    positive_mask: torch.Tensor,
+) -> torch.Tensor:
+    """Symmetric best-positive vector alignment for multi-positive labels."""
+    cosine = torch.einsum("ncd,mcd->nmc", source_vectors, target_vectors)
+    masked = cosine.masked_fill(~positive_mask.unsqueeze(-1), -torch.inf)
+
+    source_valid = positive_mask.any(dim=1)
+    target_valid = positive_mask.any(dim=0)
+    source_best = masked[source_valid].amax(dim=1)
+    target_best = masked[:, target_valid].amax(dim=0)
+    return 0.5 * (
+        (1.0 - source_best).mean()
+        + (1.0 - target_best).mean()
+    )
+
+
 def fine_equivariant_alignment_loss(
     source_vectors: torch.Tensor,
     target_vectors: torch.Tensor,
     positive_mask: torch.Tensor,
     ground_truth_transform: torch.Tensor,
+    conditioning_weight: float = 0.1,
 ) -> torch.Tensor:
-    """Align Fine vector features with the known ground-truth rotation."""
+    """Align vector features and prevent channel-rank collapse.
+
+    Multi-positive geometric labels are handled with a symmetric best-positive
+    objective instead of forcing every point inside the radius to share the
+    same local frame.
+    """
     if source_vectors.ndim != 3 or source_vectors.shape[-1] != 3:
         raise ValueError("source_vectors must have shape (N, C, 3)")
     if target_vectors.ndim != 3 or target_vectors.shape[-1] != 3:
@@ -159,18 +311,31 @@ def fine_equivariant_alignment_loss(
         raise ValueError("source and target vector channel shapes must match")
     if positive_mask.shape != (len(source_vectors), len(target_vectors)):
         raise ValueError("positive_mask shape must match vector point counts")
-    source_indices, target_indices = torch.nonzero(
-        positive_mask,
-        as_tuple=True,
-    )
-    if source_indices.numel() == 0:
+    if not bool(positive_mask.any()):
         raise ValueError("equivariant loss requires at least one positive pair")
+    if conditioning_weight < 0:
+        raise ValueError("conditioning_weight must be non-negative")
+
     rotation = ground_truth_transform[:3, :3]
     rotated = source_vectors @ rotation.T
-    source_positive = F.normalize(rotated[source_indices], dim=-1)
-    target_positive = F.normalize(target_vectors[target_indices], dim=-1)
-    cosine = (source_positive * target_positive).sum(dim=-1)
-    return (1.0 - cosine).mean()
+    source_normalized = F.normalize(rotated, dim=-1, eps=1e-6)
+    target_normalized = F.normalize(target_vectors, dim=-1, eps=1e-6)
+    alignment = _best_positive_alignment_loss(
+        source_normalized,
+        target_normalized,
+        positive_mask,
+    )
+    conditioning = 0.5 * (
+        equivariant_channel_conditioning_loss(
+            source_vectors,
+            positive_mask.any(dim=1),
+        )
+        + equivariant_channel_conditioning_loss(
+            target_vectors,
+            positive_mask.any(dim=0),
+        )
+    )
+    return alignment + float(conditioning_weight) * conditioning
 
 
 class _ChunkedBidirectionalAttention(nn.Module):
@@ -276,6 +441,8 @@ class FinePointMatcher(nn.Module):
         )
         if min(values) <= 0:
             raise ValueError("FinePointMatcher dimensions and limits must be positive")
+        if equivariant_channels < 3:
+            raise ValueError("equivariant_channels must be at least three")
         if feature_dim % num_heads:
             raise ValueError("feature_dim must be divisible by num_heads")
         self.max_pair_elements = int(max_pair_elements)
@@ -388,4 +555,3 @@ def freeze_for_fine_point_training(refiner: nn.Module) -> None:
         parameter.requires_grad_(True)
     refiner.eval()
     matcher.train()
-
