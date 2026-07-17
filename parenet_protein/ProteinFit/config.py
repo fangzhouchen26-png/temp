@@ -44,6 +44,28 @@ _C.data.val_ratio = 0.15
 _C.data.min_source_points = 128
 _C.data.min_target_points = 256
 
+# Input-level spherical target cropping.  The crop diameter is exactly
+# diameter_scale times the robust source-chain diameter.  With the default
+# 1.25 setting: D_crop = 1.25 * D_chain and r_crop = 1.25 * r_chain.
+_C.crop = edict()
+_C.crop.enabled = True
+_C.crop.diameter_scale = 1.25
+_C.crop.radius_quantile = 0.99
+# Sliding-center spacing as a fraction of the source-chain diameter.
+_C.crop.stride_ratio = 0.25
+_C.crop.min_stride = 2.0  # Angstrom
+_C.crop.min_points = 128
+_C.crop.max_candidates = None  # compare every valid sliding window
+# Training/validation use the known chain location to provide positive crops.
+# Testing searches the complete target map with target-supported sliding centers.
+_C.crop.train_mode = "oracle"
+_C.crop.val_mode = "oracle"
+_C.crop.test_mode = "sliding"
+_C.crop.train_center_jitter_ratio = 0.10
+_C.crop.min_chain_coverage = 0.85
+# Reject oracle training/validation pairs whose source-to-crop point overlap is too low.
+_C.crop.min_oracle_overlap = 0.50
+
 _C.train = edict()
 _C.train.batch_size = 1
 _C.train.num_workers = 4

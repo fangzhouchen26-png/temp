@@ -20,6 +20,11 @@ def make_parser():
     return parser
 
 
+def _scalar(value):
+    array = np.asarray(release_cuda(value))
+    return array.item()
+
+
 class Tester(SingleTester):
     def __init__(self, cfg):
         super().__init__(cfg, parser=make_parser())
@@ -42,14 +47,23 @@ class Tester(SingleTester):
         return self.evaluator(output_dict, data_dict)
 
     def summary_string(self, iteration, data_dict, output_dict, result_dict):
-        message = f"{data_dict['case_id']}/chain{data_dict['chain_id']}"
+        candidate_id = int(_scalar(data_dict["candidate_id"]))
+        message = (
+            f"{data_dict['case_id']}/chain{data_dict['chain_id']}"
+            f"/candidate{candidate_id:04d}"
+        )
         return message + ", " + get_log_string(result_dict=result_dict)
 
     def after_test_step(self, iteration, data_dict, output_dict, result_dict):
         case_id = data_dict["case_id"]
         chain_id = data_dict["chain_id"]
+        candidate_id = int(_scalar(data_dict["candidate_id"]))
         ensure_dir(osp.join(self.output_dir, case_id))
-        path = osp.join(self.output_dir, case_id, f"chain{chain_id}.npz")
+        path = osp.join(
+            self.output_dir,
+            case_id,
+            f"chain{chain_id}_candidate{candidate_id:04d}.npz",
+        )
         np.savez_compressed(
             path,
             ref_points=release_cuda(output_dict["ref_points"]),
@@ -60,6 +74,12 @@ class Tester(SingleTester):
             estimated_transform=release_cuda(output_dict["estimated_transform"]),
             transform=release_cuda(data_dict["transform"]),
             overlap=release_cuda(data_dict["overlap"]),
+            candidate_id=candidate_id,
+            window_center=release_cuda(data_dict["window_center"]),
+            crop_radius=release_cuda(data_dict["crop_radius"]),
+            crop_diameter=release_cuda(data_dict["crop_diameter"]),
+            chain_radius=release_cuda(data_dict["chain_radius"]),
+            chain_diameter=release_cuda(data_dict["chain_diameter"]),
         )
 
 

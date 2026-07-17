@@ -1,6 +1,6 @@
 # PARE-Net protein density-point-cloud adapter
 
-This directory adapts upstream [PARE-Net](https://github.com/yaorz97/PARENet) to register a simulated single-chain density point cloud against the complete protein or complex density point cloud stored under `dataset/`.
+This directory adapts upstream [PARE-Net](https://github.com/yaorz97/PARENet) to register a simulated single-chain density point cloud against spherical candidate crops extracted from the complete protein or complex density point cloud stored under `dataset/`.
 
 ## Task definition
 
@@ -10,7 +10,9 @@ For each valid chain:
 - source: `<case>/<case>_model*_chain*_src_2.00.txt`
 - output: a rigid `4 x 4` transform mapping the augmented source into the reference coordinate system
 
-Coordinates stay in Angstroms. During training, the source is rotated around its centroid, translated by up to 30 Angstrom per axis, optionally thinned, and perturbed by coordinate noise. The inverse augmentation is supplied as the ground-truth transform.
+Coordinates stay in Angstroms. The target crop diameter is fixed to `1.25 x` the robust source-chain diameter (`r_crop = 1.25 x r_chain`, with `r_chain` computed from the 99th percentile of distances to the chain centroid). Training and validation use an oracle positive crop around the known chain location. Testing generates target-supported sliding-window centers across the complete map and runs the complete PARE-Net pipeline independently for every candidate crop.
+
+During training, the source is rotated around its centroid, translated by up to 30 Angstrom per axis, optionally thinned, and perturbed by coordinate noise. The inverse augmentation is supplied as the ground-truth transform.
 
 Cases, rather than individual chains, are assigned to train/validation/test splits. This prevents different chains sharing the same complete target map from leaking across splits.
 
@@ -60,6 +62,25 @@ To force training and testing to use the saved split:
 export PROTEINFIT_SPLIT_FILE="$(realpath ../../../parenet_protein/protein_splits.json)"
 ```
 
+## Preflight before training
+
+Run the exact coarse-patch audit across multiple deterministic augmentations:
+
+```bash
+cd external/PARENet/experiments/ProteinFit
+export PROTEINFIT_DATASET_ROOT="$(realpath ../../../dataset)"
+CUDA_VISIBLE_DEVICES=0 python audit_training_windows.py --subset train --augmentation-repeats 3
+CUDA_VISIBLE_DEVICES=0 python audit_training_windows.py --subset val --augmentation-repeats 3
+```
+
+Then verify a real forward/loss/backward/optimizer path:
+
+```bash
+CUDA_VISIBLE_DEVICES=0 python smoke_train.py --steps 20
+```
+
+Do not start a full run unless both commands report `PASS`.
+
 ## Train
 
 ```bash
@@ -70,6 +91,9 @@ CUDA_VISIBLE_DEVICES=0 python trainval.py
 
 The initial settings are deliberately conservative for 2 Angstrom density samples:
 
+- spherical crop diameter: `1.25 x` source-chain diameter
+- sliding-window center stride: `0.25 x` source-chain diameter, minimum 2 Angstrom
+- all valid sliding windows are compared by default (`crop.max_candidates = None`)
 - stage voxel scales: approximately 2, 4, and 8 Angstrom
 - ground-truth node radius: 4 Angstrom
 - fine positive radius: 3 Angstrom
@@ -88,7 +112,7 @@ CUDA_VISIBLE_DEVICES=0 python test.py \
   --snapshot ../../output/ProteinFit/snapshots/<snapshot>.pth.tar
 ```
 
-Per-chain results are saved under `external/PARENet/output/ProteinFit/features/test/`.
+Per-candidate results are saved as `chain<id>_candidate<nnnn>.npz` under `external/PARENet/output/ProteinFit/features/test/`. Each file records the window center, chain/crop diameter, estimated transform, correspondences, and scores.
 
 ## Important limitations
 

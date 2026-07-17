@@ -19,6 +19,8 @@ cp "${ADAPTER_DIR}/config.py" "${DEST_DIR}/config.py"
 cp "${ADAPTER_DIR}/dataset.py" "${DEST_DIR}/dataset.py"
 cp "${ADAPTER_DIR}/loss.py" "${DEST_DIR}/loss.py"
 cp "${ADAPTER_DIR}/inspect_dataset.py" "${DEST_DIR}/inspect_dataset.py"
+cp "${ADAPTER_DIR}/audit_training_windows.py" "${DEST_DIR}/audit_training_windows.py"
+cp "${ADAPTER_DIR}/smoke_train.py" "${DEST_DIR}/smoke_train.py"
 cp "${ADAPTER_DIR}/test.py" "${DEST_DIR}/test.py"
 
 echo "Installed ProteinFit experiment at: ${DEST_DIR}"

@@ -1,8 +1,9 @@
 """Protein density point-cloud pairs for PARE-Net.
 
 Each sample registers a simulated single-chain density point cloud (source)
-against the complete protein/complex density point cloud (reference).
-Coordinates remain in Angstroms.
+against either an oracle target crop or a sliding-window crop extracted from the
+complete protein/complex density point cloud (reference). Coordinates remain in
+Angstroms.
 """
 
 from __future__ import annotations
@@ -34,6 +35,14 @@ class ProteinPair:
     src_path: Path
     ref_count: int
     src_count: int
+
+
+@dataclass(frozen=True)
+class ProteinWindow:
+    pair_index: int
+    candidate_id: int
+    center: Tuple[float, float, float]
+    radius: float
 
 
 def _nonempty_lines(path: Path) -> List[str]:
@@ -287,6 +296,110 @@ def apply_transform(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
     return points @ transform[:3, :3].T + transform[:3, 3]
 
 
+def compute_chain_radius(
+    points: np.ndarray,
+    quantile: float = 0.99,
+) -> Tuple[np.ndarray, float]:
+    """Return the chain centroid and a robust bounding-sphere radius in Angstroms."""
+    if points.ndim != 2 or points.shape[1] != 3 or points.shape[0] == 0:
+        raise ValueError(f"Expected a non-empty Nx3 point cloud, got {points.shape}")
+    if not (0.0 < quantile <= 1.0):
+        raise ValueError("radius quantile must be in (0, 1]")
+
+    center = points.mean(axis=0).astype(np.float32)
+    distances = np.linalg.norm(points - center[None, :], axis=1)
+    radius = float(np.quantile(distances, quantile))
+    if not np.isfinite(radius) or radius <= 0.0:
+        raise ValueError("Computed an invalid chain radius")
+    return center, radius
+
+
+def crop_spherical_window(
+    points: np.ndarray,
+    center: np.ndarray,
+    radius: float,
+) -> np.ndarray:
+    """Extract all points inside a closed spherical window."""
+    if radius <= 0.0:
+        raise ValueError("crop radius must be positive")
+    delta = points - np.asarray(center, dtype=np.float32)[None, :]
+    mask = np.einsum("ij,ij->i", delta, delta) <= radius * radius
+    return points[mask]
+
+
+def chain_window_coverage(
+    chain_points: np.ndarray,
+    center: np.ndarray,
+    radius: float,
+) -> float:
+    """Fraction of original chain points covered by a spherical window."""
+    if chain_points.size == 0:
+        return 0.0
+    delta = chain_points - np.asarray(center, dtype=np.float32)[None, :]
+    inside = np.einsum("ij,ij->i", delta, delta) <= radius * radius
+    return float(np.mean(inside))
+
+
+def _voxelized_window_centers(points: np.ndarray, stride: float) -> np.ndarray:
+    """Generate target-supported sliding centers using a regular 3-D grid."""
+    if points.shape[0] == 0:
+        return np.empty((0, 3), dtype=np.float32)
+    if stride <= 0.0:
+        raise ValueError("window stride must be positive")
+
+    origin = points.min(axis=0)
+    voxel_indices = np.floor((points - origin[None, :]) / stride).astype(np.int64)
+    _, inverse = np.unique(voxel_indices, axis=0, return_inverse=True)
+    num_voxels = int(inverse.max()) + 1
+
+    centers = np.zeros((num_voxels, 3), dtype=np.float64)
+    counts = np.zeros((num_voxels,), dtype=np.int64)
+    np.add.at(centers, inverse, points)
+    np.add.at(counts, inverse, 1)
+    centers /= counts[:, None]
+    return centers.astype(np.float32)
+
+
+def _farthest_point_subset(points: np.ndarray, max_points: Optional[int]) -> np.ndarray:
+    """Deterministically retain spatially distributed candidate centers."""
+    if max_points is None or points.shape[0] <= max_points:
+        return points
+    if max_points < 1:
+        raise ValueError("max_candidates must be positive or None")
+
+    centroid = points.mean(axis=0)
+    first = int(np.argmax(np.linalg.norm(points - centroid[None, :], axis=1)))
+    selected = np.empty((max_points,), dtype=np.int64)
+    selected[0] = first
+    min_sq_distances = np.full((points.shape[0],), np.inf, dtype=np.float64)
+
+    for i in range(1, max_points):
+        delta = points - points[selected[i - 1]][None, :]
+        sq_distances = np.einsum("ij,ij->i", delta, delta)
+        min_sq_distances = np.minimum(min_sq_distances, sq_distances)
+        selected[i] = int(np.argmax(min_sq_distances))
+
+    return points[selected]
+
+
+def generate_sliding_window_centers(
+    target_points: np.ndarray,
+    stride: float,
+    crop_radius: float,
+    min_points: int,
+    max_candidates: Optional[int],
+) -> np.ndarray:
+    """Generate valid target-supported centers for spherical sliding windows."""
+    centers = _voxelized_window_centers(target_points, stride)
+    if centers.shape[0] == 0:
+        return centers
+
+    tree = cKDTree(target_points)
+    counts = tree.query_ball_point(centers, crop_radius, return_length=True, workers=1)
+    centers = centers[np.asarray(counts) >= min_points]
+    return _farthest_point_subset(centers, max_candidates)
+
+
 def _random_keep(
     points: np.ndarray,
     keep_ratio: float,
@@ -345,12 +458,36 @@ class ProteinPairDataset(torch.utils.data.Dataset):
         augmentation_translation: float = 30.0,
         source_keep_ratio: float = 0.90,
         matching_radius: float = 4.0,
+        crop_mode: str = "none",
+        crop_diameter_scale: float = 1.25,
+        crop_radius_quantile: float = 0.99,
+        crop_stride_ratio: float = 0.25,
+        crop_min_stride: float = 2.0,
+        crop_min_points: int = 128,
+        crop_max_candidates: Optional[int] = None,
+        crop_center_jitter_ratio: float = 0.10,
+        crop_min_chain_coverage: float = 0.85,
+        crop_min_oracle_overlap: float = 0.50,
     ):
         super().__init__()
         if subset not in {"train", "val", "test"}:
             raise ValueError(f"Unknown subset: {subset}")
         if not (0.0 < source_keep_ratio <= 1.0):
             raise ValueError("source_keep_ratio must be in (0, 1]")
+        if crop_mode not in {"none", "oracle", "sliding"}:
+            raise ValueError("crop_mode must be one of: none, oracle, sliding")
+        if crop_diameter_scale <= 0.0:
+            raise ValueError("crop_diameter_scale must be positive")
+        if crop_stride_ratio <= 0.0 or crop_min_stride <= 0.0:
+            raise ValueError("crop stride parameters must be positive")
+        if crop_min_points < 1:
+            raise ValueError("crop_min_points must be positive")
+        if not (0.0 <= crop_center_jitter_ratio <= 1.0):
+            raise ValueError("crop_center_jitter_ratio must be in [0, 1]")
+        if not (0.0 < crop_min_chain_coverage <= 1.0):
+            raise ValueError("crop_min_chain_coverage must be in (0, 1]")
+        if not (0.0 < crop_min_oracle_overlap <= 1.0):
+            raise ValueError("crop_min_oracle_overlap must be in (0, 1]")
 
         self.dataset_root = Path(dataset_root).expanduser().resolve()
         self.subset = subset
@@ -363,6 +500,16 @@ class ProteinPairDataset(torch.utils.data.Dataset):
         self.augmentation_translation = augmentation_translation
         self.source_keep_ratio = source_keep_ratio
         self.matching_radius = matching_radius
+        self.crop_mode = crop_mode
+        self.crop_diameter_scale = crop_diameter_scale
+        self.crop_radius_quantile = crop_radius_quantile
+        self.crop_stride_ratio = crop_stride_ratio
+        self.crop_min_stride = crop_min_stride
+        self.crop_min_points = crop_min_points
+        self.crop_max_candidates = crop_max_candidates
+        self.crop_center_jitter_ratio = crop_center_jitter_ratio
+        self.crop_min_chain_coverage = crop_min_chain_coverage
+        self.crop_min_oracle_overlap = crop_min_oracle_overlap
 
         all_pairs, self.skipped = discover_pairs(
             self.dataset_root,
@@ -386,43 +533,201 @@ class ProteinPairDataset(torch.utils.data.Dataset):
                 "Run inspect_dataset.py and lower min-point thresholds only if justified."
             )
 
+        if self.crop_mode == "oracle":
+            self._filter_oracle_pairs()
+
+        self.windows: List[ProteinWindow] = []
+        if self.crop_mode == "sliding":
+            self._build_sliding_windows()
+
+    def _pair_crop_geometry(
+        self,
+        src_points: np.ndarray,
+    ) -> Tuple[np.ndarray, float, float, float]:
+        chain_center, chain_radius = compute_chain_radius(
+            src_points,
+            quantile=self.crop_radius_quantile,
+        )
+        chain_diameter = 2.0 * chain_radius
+        crop_diameter = self.crop_diameter_scale * chain_diameter
+        crop_radius = 0.5 * crop_diameter
+        return chain_center, chain_radius, chain_diameter, crop_radius
+
+    def _filter_oracle_pairs(self) -> None:
+        """Keep only oracle crops with sufficient physical source-to-target overlap."""
+        valid_pairs: List[ProteinPair] = []
+        identity = np.eye(4, dtype=np.float32)
+        for pair in self.pairs:
+            target_points = load_density_txt(pair.ref_path)["points"]
+            source_points = load_density_txt(pair.src_path)["points"]
+            chain_center, _, _, crop_radius = self._pair_crop_geometry(source_points)
+            crop_points = crop_spherical_window(
+                target_points,
+                chain_center,
+                crop_radius,
+            )
+            overlap = source_overlap(
+                crop_points,
+                source_points,
+                identity,
+                radius=self.matching_radius,
+            )
+            if (
+                crop_points.shape[0] >= self.crop_min_points
+                and overlap >= self.crop_min_oracle_overlap
+            ):
+                valid_pairs.append(pair)
+            else:
+                self.skipped.append(
+                    f"{pair.case_id}/chain{pair.chain_id}: oracle crop rejected; "
+                    f"points={crop_points.shape[0]}, overlap={overlap:.4f}"
+                )
+
+        self.pairs = valid_pairs
+        if not self.pairs:
+            raise RuntimeError(
+                f"No valid {self.subset} oracle pairs remain after overlap filtering. "
+                "Check coordinate frames, density thresholding, or crop geometry."
+            )
+
+    def _build_sliding_windows(self) -> None:
+        for pair_index, pair in enumerate(self.pairs):
+            target_points = load_density_txt(pair.ref_path)["points"]
+            source_points = load_density_txt(pair.src_path)["points"]
+            _, _, chain_diameter, crop_radius = self._pair_crop_geometry(source_points)
+            stride = max(self.crop_min_stride, self.crop_stride_ratio * chain_diameter)
+            centers = generate_sliding_window_centers(
+                target_points,
+                stride=stride,
+                crop_radius=crop_radius,
+                min_points=self.crop_min_points,
+                max_candidates=self.crop_max_candidates,
+            )
+            if centers.shape[0] == 0:
+                raise RuntimeError(
+                    f"{pair.case_id}/chain{pair.chain_id}: no valid spherical windows; "
+                    "reduce crop_min_points or crop_stride_ratio"
+                )
+            for candidate_id, center in enumerate(centers):
+                self.windows.append(
+                    ProteinWindow(
+                        pair_index=pair_index,
+                        candidate_id=candidate_id,
+                        center=tuple(float(v) for v in center),
+                        radius=float(crop_radius),
+                    )
+                )
+
     def __len__(self) -> int:
-        return len(self.pairs)
+        return len(self.windows) if self.crop_mode == "sliding" else len(self.pairs)
 
     def _rng(self, index: int) -> np.random.Generator:
         if self.deterministic_augmentation:
             return np.random.default_rng(self.augmentation_seed + index)
         return np.random.default_rng()
 
+    def _resolve_sample(
+        self,
+        index: int,
+    ) -> Tuple[ProteinPair, int, int, Optional[np.ndarray], Optional[float]]:
+        if self.crop_mode != "sliding":
+            return self.pairs[index], index, 0, None, None
+        window = self.windows[index]
+        pair = self.pairs[window.pair_index]
+        return (
+            pair,
+            window.pair_index,
+            window.candidate_id,
+            np.asarray(window.center, dtype=np.float32),
+            window.radius,
+        )
+
     def __getitem__(self, index: int) -> Dict[str, np.ndarray]:
-        pair = self.pairs[index]
-        rng = self._rng(index)
+        pair, pair_index, candidate_id, window_center, stored_crop_radius = self._resolve_sample(index)
+        # All sliding windows for one chain must receive the same deterministic
+        # source sampling, augmentation and source noise.  Candidate-specific target
+        # sampling/noise uses a separate RNG so it cannot shift the source RNG state.
+        source_rng = self._rng(pair_index)
+        target_rng = self._rng(index + 10000000)
 
-        ref_points = load_density_txt(pair.ref_path)["points"]
-        src_points = load_density_txt(pair.src_path)["points"]
+        ref_all = load_density_txt(pair.ref_path)["points"]
+        src_original = load_density_txt(pair.src_path)["points"]
+        chain_center, chain_radius, chain_diameter, crop_radius = self._pair_crop_geometry(
+            src_original
+        )
 
-        # Keep validation/test sampling deterministic, while training remains stochastic.
-        ref_points = _limit_points(ref_points, self.point_limit, rng)
-        src_points = _limit_points(src_points, self.point_limit, rng)
+        if self.crop_mode == "oracle":
+            window_center = chain_center.copy()
+            if self.use_augmentation and self.crop_center_jitter_ratio > 0.0:
+                max_jitter = self.crop_center_jitter_ratio * chain_radius
+                candidate_center = window_center + target_rng.uniform(
+                    -max_jitter,
+                    max_jitter,
+                    size=3,
+                ).astype(np.float32)
+                coverage = chain_window_coverage(
+                    src_original,
+                    candidate_center,
+                    crop_radius,
+                )
+                candidate_crop = crop_spherical_window(
+                    ref_all,
+                    candidate_center,
+                    crop_radius,
+                )
+                candidate_overlap = source_overlap(
+                    candidate_crop,
+                    src_original,
+                    np.eye(4, dtype=np.float32),
+                    radius=self.matching_radius,
+                )
+                if (
+                    coverage >= self.crop_min_chain_coverage
+                    and candidate_crop.shape[0] >= self.crop_min_points
+                    and candidate_overlap >= self.crop_min_oracle_overlap
+                ):
+                    window_center = candidate_center
+        elif self.crop_mode == "sliding":
+            crop_radius = float(stored_crop_radius)
+        else:
+            window_center = ref_all.mean(axis=0).astype(np.float32)
+            crop_radius = float("inf")
+
+        ref_points = (
+            crop_spherical_window(ref_all, window_center, crop_radius)
+            if self.crop_mode != "none"
+            else ref_all
+        )
+        if ref_points.shape[0] < self.crop_min_points:
+            raise RuntimeError(
+                f"{pair.case_id}/chain{pair.chain_id}/candidate{candidate_id}: "
+                f"crop contains {ref_points.shape[0]} points (<{self.crop_min_points})"
+            )
+
+        src_points = src_original
+        # Point limiting happens after spherical cropping, so the physical window is
+        # preserved even when a dense crop exceeds the model point budget.
+        ref_points = _limit_points(ref_points, self.point_limit, target_rng)
+        src_points = _limit_points(src_points, self.point_limit, source_rng)
 
         transform = np.eye(4, dtype=np.float32)
         if self.use_augmentation:
             src_points = _random_keep(
                 src_points,
                 keep_ratio=self.source_keep_ratio,
-                rng=rng,
+                rng=source_rng,
                 min_points=self.min_source_points,
             )
             src_points, transform = _make_source_augmentation(
                 src_points,
-                rng=rng,
+                rng=source_rng,
                 translation_magnitude=self.augmentation_translation,
             )
             if self.augmentation_noise > 0:
-                ref_points = ref_points + rng.normal(
+                ref_points = ref_points + target_rng.normal(
                     0.0, self.augmentation_noise, size=ref_points.shape
                 ).astype(np.float32)
-                src_points = src_points + rng.normal(
+                src_points = src_points + source_rng.normal(
                     0.0, self.augmentation_noise, size=src_points.shape
                 ).astype(np.float32)
 
@@ -437,7 +742,13 @@ class ProteinPairDataset(torch.utils.data.Dataset):
             "scene_name": pair.case_id,
             "case_id": pair.case_id,
             "chain_id": pair.chain_id,
-            "ref_frame": "target",
+            "candidate_id": np.asarray(candidate_id, dtype=np.int64),
+            "window_center": np.asarray(window_center, dtype=np.float32),
+            "crop_radius": np.asarray(crop_radius, dtype=np.float32),
+            "crop_diameter": np.asarray(2.0 * crop_radius, dtype=np.float32),
+            "chain_radius": np.asarray(chain_radius, dtype=np.float32),
+            "chain_diameter": np.asarray(chain_diameter, dtype=np.float32),
+            "ref_frame": f"target_candidate{candidate_id:04d}",
             "src_frame": f"chain{pair.chain_id}",
             "overlap": np.asarray(overlap, dtype=np.float32),
             "ref_points": ref_points.astype(np.float32),
@@ -446,6 +757,7 @@ class ProteinPairDataset(torch.utils.data.Dataset):
             "src_feats": np.ones((src_points.shape[0], 1), dtype=np.float32),
             "transform": transform.astype(np.float32),
         }
+
 
 
 def _dataset_kwargs(cfg) -> Dict[str, object]:
@@ -459,6 +771,15 @@ def _dataset_kwargs(cfg) -> Dict[str, object]:
         "min_source_points": cfg.data.min_source_points,
         "min_target_points": cfg.data.min_target_points,
         "matching_radius": cfg.train.matching_radius,
+        "crop_diameter_scale": cfg.crop.diameter_scale,
+        "crop_radius_quantile": cfg.crop.radius_quantile,
+        "crop_stride_ratio": cfg.crop.stride_ratio,
+        "crop_min_stride": cfg.crop.min_stride,
+        "crop_min_points": cfg.crop.min_points,
+        "crop_max_candidates": cfg.crop.max_candidates,
+        "crop_center_jitter_ratio": cfg.crop.train_center_jitter_ratio,
+        "crop_min_chain_coverage": cfg.crop.min_chain_coverage,
+        "crop_min_oracle_overlap": cfg.crop.min_oracle_overlap,
     }
 
 
@@ -473,6 +794,7 @@ def train_valid_data_loader(cfg, distributed):
         augmentation_noise=cfg.train.augmentation_noise,
         augmentation_translation=cfg.train.augmentation_translation,
         source_keep_ratio=cfg.train.source_keep_ratio,
+        crop_mode=cfg.crop.train_mode if cfg.crop.enabled else "none",
         **common,
     )
     valid_dataset = ProteinPairDataset(
@@ -484,6 +806,7 @@ def train_valid_data_loader(cfg, distributed):
         augmentation_noise=cfg.test.augmentation_noise,
         augmentation_translation=cfg.test.augmentation_translation,
         source_keep_ratio=1.0,
+        crop_mode=cfg.crop.val_mode if cfg.crop.enabled else "none",
         **common,
     )
 
@@ -527,6 +850,7 @@ def test_data_loader(cfg, benchmark):
         augmentation_noise=cfg.test.augmentation_noise,
         augmentation_translation=cfg.test.augmentation_translation,
         source_keep_ratio=1.0,
+        crop_mode=cfg.crop.test_mode if cfg.crop.enabled else "none",
         **_dataset_kwargs(cfg),
     )
     loader = build_dataloader_stack_mode(
