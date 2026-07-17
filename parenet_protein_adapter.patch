@@ -1,0 +1,1266 @@
+diff --git a/parenet_protein/ProteinFit/__init__.py b/parenet_protein/ProteinFit/__init__.py
+new file mode 100644
+index 0000000..7759248
+--- /dev/null
++++ b/parenet_protein/ProteinFit/__init__.py
+@@ -0,0 +1 @@
++"""ProteinFit experiment adapter for PARE-Net."""
+diff --git a/parenet_protein/ProteinFit/config.py b/parenet_protein/ProteinFit/config.py
+new file mode 100644
+index 0000000..7086d4d
+--- /dev/null
++++ b/parenet_protein/ProteinFit/config.py
+@@ -0,0 +1,165 @@
++import argparse
++import os
++import os.path as osp
++
++from easydict import EasyDict as edict
++
++from pareconv.utils.common import ensure_dir
++
++
++_C = edict()
++_C.seed = 7351
++
++_C.working_dir = osp.dirname(osp.realpath(__file__))
++_C.root_dir = osp.dirname(osp.dirname(_C.working_dir))
++_C.exp_name = osp.basename(_C.working_dir)
++_C.output_dir = osp.join(_C.root_dir, "output", _C.exp_name)
++_C.snapshot_dir = osp.join(_C.output_dir, "snapshots")
++_C.log_dir = osp.join(_C.output_dir, "logs")
++_C.event_dir = osp.join(_C.output_dir, "wandb_events")
++_C.feature_dir = osp.join(_C.output_dir, "features")
++_C.registration_dir = osp.join(_C.output_dir, "registration")
++for path in (
++    _C.output_dir,
++    _C.snapshot_dir,
++    _C.log_dir,
++    _C.event_dir,
++    _C.feature_dir,
++    _C.registration_dir,
++):
++    ensure_dir(path)
++
++# The installer places PARENet at <temp>/external/PARENet, so the repository
++# dataset defaults to <temp>/dataset. Override with PROTEINFIT_DATASET_ROOT.
++_C.data = edict()
++_C.data.dataset_root = os.environ.get(
++    "PROTEINFIT_DATASET_ROOT",
++    osp.abspath(osp.join(_C.root_dir, "..", "..", "dataset")),
++)
++_C.data.split_file = os.environ.get("PROTEINFIT_SPLIT_FILE") or None
++_C.data.point_suffix = os.environ.get("PROTEINFIT_POINT_SUFFIX", "_2.00.txt")
++_C.data.split_seed = 7351
++_C.data.train_ratio = 0.70
++_C.data.val_ratio = 0.15
++_C.data.min_source_points = 128
++_C.data.min_target_points = 256
++
++_C.train = edict()
++_C.train.batch_size = 1
++_C.train.num_workers = 4
++_C.train.point_limit = 30000
++_C.train.augmentation_noise = 0.25  # Angstrom
++_C.train.augmentation_translation = 30.0  # Angstrom per axis
++_C.train.source_keep_ratio = 0.90
++_C.train.matching_radius = 4.0  # Angstrom
++
++_C.test = edict()
++_C.test.batch_size = 1
++_C.test.num_workers = 2
++_C.test.point_limit = 30000
++_C.test.augmentation_noise = 0.0
++_C.test.augmentation_translation = 30.0
++
++_C.eval = edict()
++_C.eval.acceptance_overlap = 0.0
++_C.eval.acceptance_radius = 4.0
++_C.eval.inlier_ratio_threshold = 0.05
++_C.eval.rmse_threshold = 5.0
++_C.eval.rre_threshold = 15.0
++_C.eval.rte_threshold = 5.0
++_C.eval.feat_rre_threshold = 20.0
++
++_C.ransac = edict()
++_C.ransac.distance_threshold = 4.0
++_C.ransac.num_points = 3
++_C.ransac.num_iterations = 1000
++
++_C.optim = edict()
++_C.optim.lr = 1e-4
++_C.optim.lr_decay = 0.95
++_C.optim.lr_decay_steps = 1
++_C.optim.weight_decay = 1e-6
++_C.optim.max_epoch = 80
++_C.optim.grad_acc_steps = 1
++
++_C.backbone = edict()
++_C.backbone.num_stages = 4
++_C.backbone.num_neighbors = [35] * _C.backbone.num_stages
++# precompute_subsample multiplies before generating stage 1; 1.0 therefore
++# produces approximately 2, 4 and 8 Angstrom voxel grids at stages 1..3.
++_C.backbone.init_voxel_size = 1.0
++_C.backbone.subsample_ratio = 2
++_C.backbone.kernel_size = 4
++_C.backbone.share_nonlinearity = False
++_C.backbone.conv_way = "edge_conv"
++_C.backbone.use_xyz = True
++_C.backbone.init_dim = 96
++_C.backbone.output_dim = 256
++
++_C.model = edict()
++_C.model.ground_truth_matching_radius = 4.0
++_C.model.num_points_in_patch = 32
++
++_C.coarse_matching = edict()
++_C.coarse_matching.num_targets = 64
++_C.coarse_matching.overlap_threshold = 0.1
++_C.coarse_matching.num_correspondences = 128
++_C.coarse_matching.dual_normalization = True
++
++_C.geotransformer = edict()
++_C.geotransformer.input_dim = 768
++_C.geotransformer.hidden_dim = 192
++_C.geotransformer.output_dim = 192
++_C.geotransformer.num_heads = 4
++_C.geotransformer.blocks = ["self", "cross", "self", "cross", "self", "cross"]
++_C.geotransformer.sigma_d = 8.0
++_C.geotransformer.sigma_a = 15
++_C.geotransformer.angle_k = 3
++_C.geotransformer.reduction_a = "max"
++
++_C.fine_matching = edict()
++_C.fine_matching.topk = 3
++_C.fine_matching.acceptance_radius = 4.0
++_C.fine_matching.confidence_threshold = 0.005
++_C.fine_matching.num_hypotheses = 512
++_C.fine_matching.num_refinement_steps = 5
++_C.fine_matching.use_encoder_re_feats = True
++
++_C.coarse_loss = edict()
++_C.coarse_loss.positive_margin = 0.1
++_C.coarse_loss.negative_margin = 1.4
++_C.coarse_loss.positive_optimal = 0.1
++_C.coarse_loss.negative_optimal = 1.4
++_C.coarse_loss.log_scale = 24
++_C.coarse_loss.positive_overlap = 0.1
++
++_C.fine_loss = edict()
++_C.fine_loss.positive_radius = 3.0
++_C.fine_loss.negative_radius = 8.0
++_C.fine_loss.positive_margin = 0.1
++_C.fine_loss.negative_margin = 1.4
++
++_C.loss = edict()
++_C.loss.weight_coarse_loss = 1.0
++_C.loss.weight_fine_ri_loss = 1.0
++_C.loss.weight_fine_re_loss = 1.0
++
++
++def make_cfg():
++    return _C
++
++
++def parse_args():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--link_output", action="store_true")
++    return parser.parse_args()
++
++
++def main():
++    args = parse_args()
++    if args.link_output and not osp.exists("output"):
++        os.symlink(_C.output_dir, "output")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/parenet_protein/ProteinFit/dataset.py b/parenet_protein/ProteinFit/dataset.py
+new file mode 100644
+index 0000000..01bb290
+--- /dev/null
++++ b/parenet_protein/ProteinFit/dataset.py
+@@ -0,0 +1,544 @@
++"""Protein density point-cloud pairs for PARE-Net.
++
++Each sample registers a simulated single-chain density point cloud (source)
++against the complete protein/complex density point cloud (reference).
++Coordinates remain in Angstroms.
++"""
++
++from __future__ import annotations
++
++import json
++import math
++import os
++import re
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Dict, Iterable, List, Optional, Sequence, Tuple
++
++import numpy as np
++import torch
++from scipy.spatial import cKDTree
++from scipy.spatial.transform import Rotation
++
++from pareconv.utils.data import (
++    build_dataloader_stack_mode,
++    registration_collate_fn_stack_mode,
++)
++
++
++@dataclass(frozen=True)
++class ProteinPair:
++    case_id: str
++    chain_id: str
++    ref_path: Path
++    src_path: Path
++    ref_count: int
++    src_count: int
++
++
++def _nonempty_lines(path: Path) -> List[str]:
++    with path.open("r", encoding="utf-8") as handle:
++        return [line.strip() for line in handle if line.strip()]
++
++
++def count_density_points(path: Path) -> int:
++    """Return the number of point records without parsing all floating values."""
++    try:
++        line_count = len(_nonempty_lines(path))
++    except (OSError, UnicodeError):
++        return 0
++    if line_count < 7:
++        return 0
++    payload = line_count - 5
++    return payload // 2 if payload % 2 == 0 else 0
++
++
++def load_density_txt(path: os.PathLike) -> Dict[str, np.ndarray]:
++    """Parse the custom ``*_2.00.txt`` density point-cloud format.
++
++    File layout:
++      1. voxel spacing
++      2. grid dimensions
++      3. map center
++      4. map origin
++      5. statistics
++      6+. alternating index and attribute rows
++
++    Point coordinates are reconstructed as ``origin + spacing * (ix, iy, iz)``.
++    """
++    path = Path(path)
++    lines = _nonempty_lines(path)
++    if len(lines) < 7:
++        raise ValueError(f"{path}: empty or incomplete density point file")
++
++    try:
++        spacing = float(lines[0])
++        grid_shape = np.asarray([int(v) for v in lines[1].split()], dtype=np.int32)
++        center = np.asarray([float(v) for v in lines[2].split()], dtype=np.float64)
++        origin = np.asarray([float(v) for v in lines[3].split()], dtype=np.float64)
++        statistics = np.asarray([float(v) for v in lines[4].split()], dtype=np.float64)
++    except ValueError as exc:
++        raise ValueError(f"{path}: malformed five-line header") from exc
++
++    if grid_shape.shape != (3,) or center.shape != (3,) or origin.shape != (3,):
++        raise ValueError(f"{path}: expected three-dimensional grid metadata")
++    if spacing <= 0:
++        raise ValueError(f"{path}: voxel spacing must be positive")
++
++    payload = lines[5:]
++    if len(payload) % 2:
++        raise ValueError(f"{path}: point records must occupy two lines each")
++
++    count = len(payload) // 2
++    voxel_indices = np.empty((count, 3), dtype=np.int32)
++    flat_indices = np.empty((count,), dtype=np.int64)
++    normals = np.empty((count, 3), dtype=np.float32)
++    density = np.empty((count,), dtype=np.float32)
++
++    for point_index in range(count):
++        index_fields = payload[2 * point_index].split()
++        attr_fields = payload[2 * point_index + 1].split()
++        if len(index_fields) != 4 or len(attr_fields) != 4:
++            raise ValueError(f"{path}: malformed point record {point_index}")
++        try:
++            flat_indices[point_index] = int(index_fields[0])
++            voxel_indices[point_index] = [int(v) for v in index_fields[1:4]]
++            normals[point_index] = [float(v) for v in attr_fields[0:3]]
++            density[point_index] = float(attr_fields[3])
++        except ValueError as exc:
++            raise ValueError(f"{path}: non-numeric point record {point_index}") from exc
++
++    points = origin[None, :] + spacing * voxel_indices.astype(np.float64)
++    return {
++        "points": points.astype(np.float32),
++        "normals": normals,
++        "density": density,
++        "voxel_indices": voxel_indices,
++        "flat_indices": flat_indices,
++        "voxel_size": np.asarray(spacing, dtype=np.float32),
++        "grid_shape": grid_shape,
++        "center": center.astype(np.float32),
++        "origin": origin.astype(np.float32),
++        "statistics": statistics.astype(np.float32),
++    }
++
++
++def _chain_id_from_path(path: Path) -> str:
++    match = re.search(r"_chain([^_]+)_src_", path.name)
++    return match.group(1) if match else path.stem
++
++
++def discover_pairs(
++    dataset_root: os.PathLike,
++    point_suffix: str = "_2.00.txt",
++    min_source_points: int = 128,
++    min_target_points: int = 256,
++) -> Tuple[List[ProteinPair], List[str]]:
++    """Discover valid chain-to-complex pairs and return skipped-file messages."""
++    root = Path(dataset_root).expanduser().resolve()
++    if not root.is_dir():
++        raise FileNotFoundError(f"Dataset root does not exist: {root}")
++
++    pairs: List[ProteinPair] = []
++    skipped: List[str] = []
++    for case_dir in sorted(path for path in root.iterdir() if path.is_dir()):
++        case_id = case_dir.name
++        ref_candidates = sorted(case_dir.glob(f"*_tgt{point_suffix}"))
++        if not ref_candidates:
++            skipped.append(f"{case_id}: no target file matching *_tgt{point_suffix}")
++            continue
++        ref_path = ref_candidates[0]
++        ref_count = count_density_points(ref_path)
++        if ref_count < min_target_points:
++            skipped.append(
++                f"{case_id}: target has {ref_count} points (<{min_target_points})"
++            )
++            continue
++
++        src_candidates = sorted(case_dir.glob(f"*_src{point_suffix}"))
++        if not src_candidates:
++            skipped.append(f"{case_id}: no source file matching *_src{point_suffix}")
++            continue
++
++        for src_path in src_candidates:
++            src_count = count_density_points(src_path)
++            chain_id = _chain_id_from_path(src_path)
++            if src_count < min_source_points:
++                skipped.append(
++                    f"{case_id}/chain{chain_id}: source has {src_count} points "
++                    f"(<{min_source_points})"
++                )
++                continue
++            pairs.append(
++                ProteinPair(
++                    case_id=case_id,
++                    chain_id=chain_id,
++                    ref_path=ref_path,
++                    src_path=src_path,
++                    ref_count=ref_count,
++                    src_count=src_count,
++                )
++            )
++    return pairs, skipped
++
++
++def build_case_splits(
++    case_ids: Sequence[str],
++    seed: int = 7351,
++    train_ratio: float = 0.70,
++    val_ratio: float = 0.15,
++) -> Dict[str, List[str]]:
++    """Create deterministic, case-level splits with no target-map leakage."""
++    unique_cases = np.asarray(sorted(set(case_ids)), dtype=object)
++    if unique_cases.size == 0:
++        return {"train": [], "val": [], "test": []}
++
++    rng = np.random.default_rng(seed)
++    unique_cases = unique_cases[rng.permutation(unique_cases.size)]
++    n_cases = unique_cases.size
++
++    if n_cases < 3:
++        return {
++            "train": unique_cases.tolist(),
++            "val": unique_cases[-1:].tolist(),
++            "test": unique_cases[-1:].tolist(),
++        }
++
++    n_train = max(1, int(round(n_cases * train_ratio)))
++    n_val = max(1, int(round(n_cases * val_ratio)))
++    if n_train + n_val >= n_cases:
++        n_train = max(1, n_cases - 2)
++        n_val = 1
++    n_test = n_cases - n_train - n_val
++    if n_test < 1:
++        n_test = 1
++        n_train = max(1, n_train - 1)
++
++    return {
++        "train": unique_cases[:n_train].tolist(),
++        "val": unique_cases[n_train : n_train + n_val].tolist(),
++        "test": unique_cases[n_train + n_val :].tolist(),
++    }
++
++
++def load_or_build_splits(
++    pairs: Sequence[ProteinPair],
++    split_file: Optional[os.PathLike],
++    seed: int,
++    train_ratio: float,
++    val_ratio: float,
++) -> Dict[str, List[str]]:
++    if split_file:
++        path = Path(split_file).expanduser()
++        if path.is_file():
++            with path.open("r", encoding="utf-8") as handle:
++                splits = json.load(handle)
++            required = {"train", "val", "test"}
++            if set(splits) != required:
++                raise ValueError(f"{path}: expected exactly {sorted(required)}")
++            return {key: [str(value) for value in values] for key, values in splits.items()}
++    return build_case_splits(
++        [pair.case_id for pair in pairs],
++        seed=seed,
++        train_ratio=train_ratio,
++        val_ratio=val_ratio,
++    )
++
++
++def _sample_uniform_rotation(rng: np.random.Generator) -> np.ndarray:
++    # Shoemake's method: a uniform unit quaternion, represented as x, y, z, w.
++    u1, u2, u3 = rng.random(3)
++    quat = np.asarray(
++        [
++            math.sqrt(1.0 - u1) * math.sin(2.0 * math.pi * u2),
++            math.sqrt(1.0 - u1) * math.cos(2.0 * math.pi * u2),
++            math.sqrt(u1) * math.sin(2.0 * math.pi * u3),
++            math.sqrt(u1) * math.cos(2.0 * math.pi * u3),
++        ],
++        dtype=np.float64,
++    )
++    return Rotation.from_quat(quat).as_matrix().astype(np.float32)
++
++
++def _make_source_augmentation(
++    points: np.ndarray,
++    rng: np.random.Generator,
++    translation_magnitude: float,
++) -> Tuple[np.ndarray, np.ndarray]:
++    """Transform source points and return (augmented_points, inverse_transform)."""
++    rotation = _sample_uniform_rotation(rng)
++    delta = rng.uniform(-translation_magnitude, translation_magnitude, size=3).astype(
++        np.float32
++    )
++    centroid = points.mean(axis=0).astype(np.float32)
++
++    # Rotate around the source centroid, then translate by delta.
++    translation = centroid + delta - centroid @ rotation.T
++    augmented = points @ rotation.T + translation
++
++    forward = np.eye(4, dtype=np.float32)
++    forward[:3, :3] = rotation
++    forward[:3, 3] = translation
++    inverse = np.linalg.inv(forward).astype(np.float32)
++    return augmented.astype(np.float32), inverse
++
++
++def apply_transform(points: np.ndarray, transform: np.ndarray) -> np.ndarray:
++    return points @ transform[:3, :3].T + transform[:3, 3]
++
++
++def _random_keep(
++    points: np.ndarray,
++    keep_ratio: float,
++    rng: np.random.Generator,
++    min_points: int,
++) -> np.ndarray:
++    if keep_ratio >= 1.0 or points.shape[0] <= min_points:
++        return points
++    keep = max(min_points, int(round(points.shape[0] * keep_ratio)))
++    keep = min(keep, points.shape[0])
++    indices = rng.choice(points.shape[0], size=keep, replace=False)
++    return points[indices]
++
++
++def _limit_points(
++    points: np.ndarray,
++    point_limit: Optional[int],
++    rng: np.random.Generator,
++) -> np.ndarray:
++    if point_limit is None or points.shape[0] <= point_limit:
++        return points
++    indices = rng.choice(points.shape[0], size=point_limit, replace=False)
++    return points[indices]
++
++
++def source_overlap(
++    ref_points: np.ndarray,
++    src_points: np.ndarray,
++    transform: np.ndarray,
++    radius: float,
++) -> float:
++    if ref_points.size == 0 or src_points.size == 0:
++        return 0.0
++    aligned = apply_transform(src_points, transform)
++    distances, _ = cKDTree(ref_points).query(aligned, k=1, workers=1)
++    return float(np.mean(distances <= radius))
++
++
++class ProteinPairDataset(torch.utils.data.Dataset):
++    def __init__(
++        self,
++        dataset_root: os.PathLike,
++        subset: str,
++        point_suffix: str = "_2.00.txt",
++        split_file: Optional[os.PathLike] = None,
++        split_seed: int = 7351,
++        train_ratio: float = 0.70,
++        val_ratio: float = 0.15,
++        point_limit: Optional[int] = 30000,
++        min_source_points: int = 128,
++        min_target_points: int = 256,
++        use_augmentation: bool = False,
++        deterministic_augmentation: bool = False,
++        augmentation_seed: int = 7351,
++        augmentation_noise: float = 0.25,
++        augmentation_translation: float = 30.0,
++        source_keep_ratio: float = 0.90,
++        matching_radius: float = 4.0,
++    ):
++        super().__init__()
++        if subset not in {"train", "val", "test"}:
++            raise ValueError(f"Unknown subset: {subset}")
++        if not (0.0 < source_keep_ratio <= 1.0):
++            raise ValueError("source_keep_ratio must be in (0, 1]")
++
++        self.dataset_root = Path(dataset_root).expanduser().resolve()
++        self.subset = subset
++        self.point_limit = point_limit
++        self.min_source_points = min_source_points
++        self.use_augmentation = use_augmentation
++        self.deterministic_augmentation = deterministic_augmentation
++        self.augmentation_seed = augmentation_seed
++        self.augmentation_noise = augmentation_noise
++        self.augmentation_translation = augmentation_translation
++        self.source_keep_ratio = source_keep_ratio
++        self.matching_radius = matching_radius
++
++        all_pairs, self.skipped = discover_pairs(
++            self.dataset_root,
++            point_suffix=point_suffix,
++            min_source_points=min_source_points,
++            min_target_points=min_target_points,
++        )
++        splits = load_or_build_splits(
++            all_pairs,
++            split_file=split_file,
++            seed=split_seed,
++            train_ratio=train_ratio,
++            val_ratio=val_ratio,
++        )
++        selected_cases = set(splits[subset])
++        self.case_splits = splits
++        self.pairs = [pair for pair in all_pairs if pair.case_id in selected_cases]
++        if not self.pairs:
++            raise RuntimeError(
++                f"No valid {subset} pairs found under {self.dataset_root}. "
++                "Run inspect_dataset.py and lower min-point thresholds only if justified."
++            )
++
++    def __len__(self) -> int:
++        return len(self.pairs)
++
++    def _rng(self, index: int) -> np.random.Generator:
++        if self.deterministic_augmentation:
++            return np.random.default_rng(self.augmentation_seed + index)
++        return np.random.default_rng()
++
++    def __getitem__(self, index: int) -> Dict[str, np.ndarray]:
++        pair = self.pairs[index]
++        rng = self._rng(index)
++
++        ref_points = load_density_txt(pair.ref_path)["points"]
++        src_points = load_density_txt(pair.src_path)["points"]
++
++        # Keep validation/test sampling deterministic, while training remains stochastic.
++        ref_points = _limit_points(ref_points, self.point_limit, rng)
++        src_points = _limit_points(src_points, self.point_limit, rng)
++
++        transform = np.eye(4, dtype=np.float32)
++        if self.use_augmentation:
++            src_points = _random_keep(
++                src_points,
++                keep_ratio=self.source_keep_ratio,
++                rng=rng,
++                min_points=self.min_source_points,
++            )
++            src_points, transform = _make_source_augmentation(
++                src_points,
++                rng=rng,
++                translation_magnitude=self.augmentation_translation,
++            )
++            if self.augmentation_noise > 0:
++                ref_points = ref_points + rng.normal(
++                    0.0, self.augmentation_noise, size=ref_points.shape
++                ).astype(np.float32)
++                src_points = src_points + rng.normal(
++                    0.0, self.augmentation_noise, size=src_points.shape
++                ).astype(np.float32)
++
++        overlap = source_overlap(
++            ref_points,
++            src_points,
++            transform,
++            radius=self.matching_radius,
++        )
++
++        return {
++            "scene_name": pair.case_id,
++            "case_id": pair.case_id,
++            "chain_id": pair.chain_id,
++            "ref_frame": "target",
++            "src_frame": f"chain{pair.chain_id}",
++            "overlap": np.asarray(overlap, dtype=np.float32),
++            "ref_points": ref_points.astype(np.float32),
++            "src_points": src_points.astype(np.float32),
++            "ref_feats": np.ones((ref_points.shape[0], 1), dtype=np.float32),
++            "src_feats": np.ones((src_points.shape[0], 1), dtype=np.float32),
++            "transform": transform.astype(np.float32),
++        }
++
++
++def _dataset_kwargs(cfg) -> Dict[str, object]:
++    return {
++        "dataset_root": cfg.data.dataset_root,
++        "point_suffix": cfg.data.point_suffix,
++        "split_file": cfg.data.split_file,
++        "split_seed": cfg.data.split_seed,
++        "train_ratio": cfg.data.train_ratio,
++        "val_ratio": cfg.data.val_ratio,
++        "min_source_points": cfg.data.min_source_points,
++        "min_target_points": cfg.data.min_target_points,
++        "matching_radius": cfg.train.matching_radius,
++    }
++
++
++def train_valid_data_loader(cfg, distributed):
++    common = _dataset_kwargs(cfg)
++    train_dataset = ProteinPairDataset(
++        subset="train",
++        point_limit=cfg.train.point_limit,
++        use_augmentation=True,
++        deterministic_augmentation=False,
++        augmentation_seed=cfg.seed,
++        augmentation_noise=cfg.train.augmentation_noise,
++        augmentation_translation=cfg.train.augmentation_translation,
++        source_keep_ratio=cfg.train.source_keep_ratio,
++        **common,
++    )
++    valid_dataset = ProteinPairDataset(
++        subset="val",
++        point_limit=cfg.test.point_limit,
++        use_augmentation=True,
++        deterministic_augmentation=True,
++        augmentation_seed=cfg.seed + 100000,
++        augmentation_noise=cfg.test.augmentation_noise,
++        augmentation_translation=cfg.test.augmentation_translation,
++        source_keep_ratio=1.0,
++        **common,
++    )
++
++    train_loader = build_dataloader_stack_mode(
++        train_dataset,
++        registration_collate_fn_stack_mode,
++        cfg.backbone.num_stages,
++        cfg.backbone.init_voxel_size,
++        cfg.backbone.num_neighbors,
++        cfg.backbone.subsample_ratio,
++        batch_size=cfg.train.batch_size,
++        num_workers=cfg.train.num_workers,
++        shuffle=True,
++        distributed=distributed,
++        precompute_data=True,
++    )
++    valid_loader = build_dataloader_stack_mode(
++        valid_dataset,
++        registration_collate_fn_stack_mode,
++        cfg.backbone.num_stages,
++        cfg.backbone.init_voxel_size,
++        cfg.backbone.num_neighbors,
++        cfg.backbone.subsample_ratio,
++        batch_size=cfg.test.batch_size,
++        num_workers=cfg.test.num_workers,
++        shuffle=False,
++        distributed=distributed,
++        precompute_data=True,
++    )
++    return train_loader, valid_loader, cfg.backbone.num_neighbors
++
++
++def test_data_loader(cfg, benchmark):
++    subset = benchmark if benchmark in {"train", "val", "test"} else "test"
++    dataset = ProteinPairDataset(
++        subset=subset,
++        point_limit=cfg.test.point_limit,
++        use_augmentation=True,
++        deterministic_augmentation=True,
++        augmentation_seed=cfg.seed + 200000,
++        augmentation_noise=cfg.test.augmentation_noise,
++        augmentation_translation=cfg.test.augmentation_translation,
++        source_keep_ratio=1.0,
++        **_dataset_kwargs(cfg),
++    )
++    loader = build_dataloader_stack_mode(
++        dataset,
++        registration_collate_fn_stack_mode,
++        cfg.backbone.num_stages,
++        cfg.backbone.init_voxel_size,
++        cfg.backbone.num_neighbors,
++        cfg.backbone.subsample_ratio,
++        batch_size=cfg.test.batch_size,
++        num_workers=cfg.test.num_workers,
++        shuffle=False,
++        precompute_data=True,
++    )
++    return loader, cfg.backbone.num_neighbors
+diff --git a/parenet_protein/ProteinFit/inspect_dataset.py b/parenet_protein/ProteinFit/inspect_dataset.py
+new file mode 100644
+index 0000000..9f66702
+--- /dev/null
++++ b/parenet_protein/ProteinFit/inspect_dataset.py
+@@ -0,0 +1,103 @@
++import argparse
++import json
++from pathlib import Path
++
++import numpy as np
++
++from dataset import (
++    ProteinPairDataset,
++    apply_transform,
++    build_case_splits,
++    discover_pairs,
++    load_density_txt,
++    source_overlap,
++)
++
++
++def make_parser():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--dataset_root", required=True)
++    parser.add_argument("--point_suffix", default="_2.00.txt")
++    parser.add_argument("--min_source_points", type=int, default=128)
++    parser.add_argument("--min_target_points", type=int, default=256)
++    parser.add_argument("--seed", type=int, default=7351)
++    parser.add_argument("--write_splits")
++    return parser
++
++
++def main():
++    args = make_parser().parse_args()
++    pairs, skipped = discover_pairs(
++        args.dataset_root,
++        point_suffix=args.point_suffix,
++        min_source_points=args.min_source_points,
++        min_target_points=args.min_target_points,
++    )
++    cases = sorted({pair.case_id for pair in pairs})
++    splits = build_case_splits(cases, seed=args.seed)
++
++    print(f"valid cases: {len(cases)}")
++    print(f"valid chain pairs: {len(pairs)}")
++    for subset in ("train", "val", "test"):
++        subset_cases = set(splits[subset])
++        subset_pairs = [pair for pair in pairs if pair.case_id in subset_cases]
++        print(f"{subset}: {len(subset_cases)} cases, {len(subset_pairs)} pairs")
++
++    if pairs:
++        src_counts = np.asarray([pair.src_count for pair in pairs])
++        ref_counts = np.asarray([pair.ref_count for pair in pairs])
++        print(
++            "source points min/median/max: "
++            f"{src_counts.min()}/{int(np.median(src_counts))}/{src_counts.max()}"
++        )
++        print(
++            "target points min/median/max: "
++            f"{ref_counts.min()}/{int(np.median(ref_counts))}/{ref_counts.max()}"
++        )
++
++        first = pairs[0]
++        ref = load_density_txt(first.ref_path)["points"]
++        src = load_density_txt(first.src_path)["points"]
++        identity = np.eye(4, dtype=np.float32)
++        print(
++            f"first-pair identity overlap@4A: "
++            f"{source_overlap(ref, src, identity, radius=4.0):.4f}"
++        )
++
++        probe = ProteinPairDataset(
++            args.dataset_root,
++            subset="train",
++            point_suffix=args.point_suffix,
++            split_seed=args.seed,
++            min_source_points=args.min_source_points,
++            min_target_points=args.min_target_points,
++            use_augmentation=True,
++            deterministic_augmentation=True,
++            augmentation_noise=0.0,
++            source_keep_ratio=1.0,
++        )[0]
++        recovered = apply_transform(probe["src_points"], probe["transform"])
++        distances = np.linalg.norm(
++            recovered - load_density_txt(
++                next(pair.src_path for pair in pairs if pair.case_id == probe["case_id"] and pair.chain_id == probe["chain_id"])
++            )["points"],
++            axis=1,
++        )
++        print(f"transform inverse max error: {distances.max():.6f} A")
++
++    if skipped:
++        print(f"skipped entries: {len(skipped)}")
++        for message in skipped[:30]:
++            print(f"  - {message}")
++        if len(skipped) > 30:
++            print(f"  ... {len(skipped) - 30} more")
++
++    if args.write_splits:
++        output = Path(args.write_splits)
++        output.parent.mkdir(parents=True, exist_ok=True)
++        output.write_text(json.dumps(splits, indent=2) + "\n", encoding="utf-8")
++        print(f"wrote split file: {output}")
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/parenet_protein/ProteinFit/loss.py b/parenet_protein/ProteinFit/loss.py
+new file mode 100644
+index 0000000..36785d3
+--- /dev/null
++++ b/parenet_protein/ProteinFit/loss.py
+@@ -0,0 +1,213 @@
++"""PARE-Net losses with empty-correspondence safeguards for protein pairs."""
++
++import torch
++import torch.nn as nn
++
++from pareconv.modules.loss import WeightedCircleLoss
++from pareconv.modules.ops.pairwise_distance import pairwise_distance
++from pareconv.modules.ops.transformation import apply_transform
++from pareconv.modules.registration.metrics import isotropic_transform_error
++
++
++def _safe_mean(values: torch.Tensor) -> torch.Tensor:
++    if values.numel() == 0:
++        return values.sum() * 0.0
++    return values.mean()
++
++
++def _safe_log_mean(probabilities: torch.Tensor) -> torch.Tensor:
++    if probabilities.numel() == 0:
++        return probabilities.sum() * 0.0
++    return probabilities.clamp(min=1e-8, max=1.0 - 1e-8).log().mean()
++
++
++class CoarseMatchingLoss(nn.Module):
++    def __init__(self, cfg):
++        super().__init__()
++        self.weighted_circle_loss = WeightedCircleLoss(
++            cfg.coarse_loss.positive_margin,
++            cfg.coarse_loss.negative_margin,
++            cfg.coarse_loss.positive_optimal,
++            cfg.coarse_loss.negative_optimal,
++            cfg.coarse_loss.log_scale,
++        )
++        self.positive_overlap = cfg.coarse_loss.positive_overlap
++
++    def forward(self, output_dict):
++        ref_feats = output_dict["ref_feats_c"]
++        src_feats = output_dict["src_feats_c"]
++        indices = output_dict["gt_node_corr_indices"]
++        corr_overlaps = output_dict["gt_node_corr_overlaps"]
++
++        feat_dists = torch.sqrt(pairwise_distance(ref_feats, src_feats, normalized=True))
++        overlaps = torch.zeros_like(feat_dists)
++        if indices.numel() > 0:
++            overlaps[indices[:, 0], indices[:, 1]] = corr_overlaps
++        pos_masks = overlaps > self.positive_overlap
++        neg_masks = overlaps == 0
++        if not torch.any(pos_masks) or not torch.any(neg_masks):
++            return feat_dists.sum() * 0.0
++        pos_scales = torch.sqrt(overlaps * pos_masks.float())
++        return self.weighted_circle_loss(pos_masks, neg_masks, feat_dists, pos_scales)
++
++
++class FineMatchingLoss(nn.Module):
++    def __init__(self, cfg):
++        super().__init__()
++        self.positive_radius = cfg.fine_loss.positive_radius
++        self.negative_radius = cfg.fine_loss.negative_radius
++        self.positive_margin = cfg.fine_loss.positive_margin
++        self.negative_margin = cfg.fine_loss.negative_margin
++
++    def forward(self, output_dict, data_dict):
++        ref_points = output_dict["ref_node_corr_knn_points"]
++        src_points = output_dict["src_node_corr_knn_points"]
++        ref_masks = output_dict["ref_node_corr_knn_masks"]
++        src_masks = output_dict["src_node_corr_knn_masks"]
++        ref_scores = output_dict["ref_node_corr_knn_scores"]
++        src_scores = output_dict["src_node_corr_knn_scores"]
++        matching_scores = output_dict["matching_scores"]
++        transform = data_dict["transform"]
++
++        src_points = apply_transform(src_points, transform)
++        dists = pairwise_distance(ref_points, src_points)
++        valid_map = torch.logical_and(ref_masks.unsqueeze(2), src_masks.unsqueeze(1))
++        positive_map = torch.logical_and(dists < self.positive_radius**2, valid_map)
++        negative_map = torch.logical_and(dists > self.negative_radius**2, valid_map)
++
++        slack_rows = torch.logical_and(positive_map.sum(2) == 0, ref_masks)
++        slack_cols = torch.logical_and(positive_map.sum(1) == 0, src_masks)
++        fine_ri_loss = -(
++            _safe_log_mean(matching_scores[positive_map])
++            + 0.5 * _safe_log_mean(1.0 - ref_scores[slack_rows])
++            + 0.5 * _safe_log_mean(1.0 - src_scores[slack_cols])
++        )
++        fine_re_loss = self.fine_re_loss(
++            output_dict, positive_map, negative_map, transform
++        )
++        return fine_ri_loss, fine_re_loss
++
++    def fine_re_loss(self, output_dict, positive_map, negative_map, transform):
++        ref_feats = output_dict["re_ref_node_corr_knn_feats"]
++        src_feats = output_dict["re_src_node_corr_knn_feats"]
++
++        batch, ref_idx, src_idx = torch.nonzero(positive_map, as_tuple=True)
++        if batch.numel() > 0:
++            ref_positive = ref_feats[batch, ref_idx]
++            src_positive = src_feats[batch, src_idx]
++            src_positive = torch.einsum(
++                "bck,lk->bcl", src_positive, transform[:3, :3]
++            )
++            positive_loss = _safe_mean(
++                torch.relu(
++                    torch.linalg.norm(src_positive - ref_positive, dim=-1)
++                    - self.positive_margin
++                )
++            )
++        else:
++            positive_loss = ref_feats.sum() * 0.0
++
++        batch, ref_idx, src_idx = torch.nonzero(negative_map, as_tuple=True)
++        if batch.numel() > 0:
++            ref_negative = ref_feats[batch, ref_idx]
++            src_negative = src_feats[batch, src_idx]
++            src_negative = torch.einsum(
++                "bck,lk->bcl", src_negative, transform[:3, :3]
++            )
++            negative_loss = _safe_mean(
++                torch.relu(
++                    self.negative_margin
++                    - torch.linalg.norm(src_negative - ref_negative, dim=-1)
++                )
++            )
++        else:
++            negative_loss = ref_feats.sum() * 0.0
++        return positive_loss + negative_loss
++
++
++class OverallLoss(nn.Module):
++    def __init__(self, cfg):
++        super().__init__()
++        self.coarse_loss = CoarseMatchingLoss(cfg)
++        self.fine_loss = FineMatchingLoss(cfg)
++        self.weight_coarse_loss = cfg.loss.weight_coarse_loss
++        self.weight_fine_ri_loss = cfg.loss.weight_fine_ri_loss
++        self.weight_fine_re_loss = cfg.loss.weight_fine_re_loss
++
++    def forward(self, output_dict, data_dict):
++        coarse_loss = self.coarse_loss(output_dict)
++        fine_ri_loss, fine_re_loss = self.fine_loss(output_dict, data_dict)
++        loss = (
++            self.weight_coarse_loss * coarse_loss
++            + self.weight_fine_ri_loss * fine_ri_loss
++            + self.weight_fine_re_loss * fine_re_loss
++        )
++        return {
++            "loss": loss,
++            "c_loss": coarse_loss,
++            "f_ri_loss": fine_ri_loss,
++            "f_re_loss": fine_re_loss,
++        }
++
++
++class Evaluator(nn.Module):
++    def __init__(self, cfg):
++        super().__init__()
++        self.acceptance_overlap = cfg.eval.acceptance_overlap
++        self.acceptance_radius = cfg.eval.acceptance_radius
++        self.acceptance_rmse = cfg.eval.rmse_threshold
++
++    @torch.no_grad()
++    def evaluate_coarse(self, output_dict):
++        ref_count = output_dict["ref_points_c"].shape[0]
++        src_count = output_dict["src_points_c"].shape[0]
++        overlaps = output_dict["gt_node_corr_overlaps"]
++        indices = output_dict["gt_node_corr_indices"]
++        indices = indices[overlaps > self.acceptance_overlap]
++        corr_map = torch.zeros(
++            ref_count,
++            src_count,
++            device=output_dict["ref_points_c"].device,
++        )
++        if indices.numel() > 0:
++            corr_map[indices[:, 0], indices[:, 1]] = 1.0
++        ref_pred = output_dict["ref_node_corr_indices"]
++        src_pred = output_dict["src_node_corr_indices"]
++        if ref_pred.numel() == 0:
++            return corr_map.sum() * 0.0
++        return corr_map[ref_pred, src_pred].mean()
++
++    @torch.no_grad()
++    def evaluate_fine(self, output_dict, data_dict):
++        ref_points = output_dict["ref_corr_points"]
++        src_points = output_dict["src_corr_points"]
++        if src_points.shape[0] == 0:
++            return data_dict["transform"].sum() * 0.0
++        src_points = apply_transform(src_points, data_dict["transform"])
++        distances = torch.linalg.norm(ref_points - src_points, dim=1)
++        return (distances < self.acceptance_radius).float().mean()
++
++    @torch.no_grad()
++    def evaluate_registration(self, output_dict, data_dict):
++        transform = data_dict["transform"]
++        estimated = output_dict["estimated_transform"]
++        src_points = output_dict["src_points"]
++        rre, rte = isotropic_transform_error(transform, estimated)
++        residual = torch.matmul(torch.inverse(transform), estimated)
++        realigned = apply_transform(src_points, residual)
++        rmse = torch.linalg.norm(realigned - src_points, dim=1).mean()
++        recall = (rmse < self.acceptance_rmse).float()
++        return rre, rte, rmse, recall
++
++    def forward(self, output_dict, data_dict):
++        coarse_precision = self.evaluate_coarse(output_dict)
++        fine_precision = self.evaluate_fine(output_dict, data_dict)
++        rre, rte, rmse, recall = self.evaluate_registration(output_dict, data_dict)
++        return {
++            "PIR": coarse_precision,
++            "IR": fine_precision,
++            "RRE": rre,
++            "RTE": rte,
++            "RMSE": rmse,
++            "RR": recall,
++        }
+diff --git a/parenet_protein/ProteinFit/test.py b/parenet_protein/ProteinFit/test.py
+new file mode 100644
+index 0000000..a2df279
+--- /dev/null
++++ b/parenet_protein/ProteinFit/test.py
+@@ -0,0 +1,71 @@
++import argparse
++import os.path as osp
++import time
++
++import numpy as np
++
++from pareconv.engine import SingleTester
++from pareconv.utils.common import ensure_dir, get_log_string
++from pareconv.utils.torch import release_cuda
++
++from config import make_cfg
++from dataset import test_data_loader
++from loss import Evaluator
++from model import create_model
++
++
++def make_parser():
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--benchmark", default="test", choices=["train", "val", "test"])
++    return parser
++
++
++class Tester(SingleTester):
++    def __init__(self, cfg):
++        super().__init__(cfg, parser=make_parser())
++        start = time.time()
++        data_loader, neighbor_limits = test_data_loader(cfg, self.args.benchmark)
++        self.logger.info(f"Data loader created in {time.time() - start:.3f}s")
++        self.logger.info(f"Neighbor limits: {neighbor_limits}")
++        self.register_loader(data_loader)
++
++        model = create_model(cfg).cuda()
++        self.register_model(model)
++        self.evaluator = Evaluator(cfg).cuda()
++        self.output_dir = osp.join(cfg.feature_dir, self.args.benchmark)
++        ensure_dir(self.output_dir)
++
++    def test_step(self, iteration, data_dict):
++        return self.model(data_dict)
++
++    def eval_step(self, iteration, data_dict, output_dict):
++        return self.evaluator(output_dict, data_dict)
++
++    def summary_string(self, iteration, data_dict, output_dict, result_dict):
++        message = f"{data_dict['case_id']}/chain{data_dict['chain_id']}"
++        return message + ", " + get_log_string(result_dict=result_dict)
++
++    def after_test_step(self, iteration, data_dict, output_dict, result_dict):
++        case_id = data_dict["case_id"]
++        chain_id = data_dict["chain_id"]
++        ensure_dir(osp.join(self.output_dir, case_id))
++        path = osp.join(self.output_dir, case_id, f"chain{chain_id}.npz")
++        np.savez_compressed(
++            path,
++            ref_points=release_cuda(output_dict["ref_points"]),
++            src_points=release_cuda(output_dict["src_points"]),
++            ref_corr_points=release_cuda(output_dict["ref_corr_points"]),
++            src_corr_points=release_cuda(output_dict["src_corr_points"]),
++            corr_scores=release_cuda(output_dict["corr_scores"]),
++            estimated_transform=release_cuda(output_dict["estimated_transform"]),
++            transform=release_cuda(data_dict["transform"]),
++            overlap=release_cuda(data_dict["overlap"]),
++        )
++
++
++def main():
++    Tester(make_cfg()).run()
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/parenet_protein/README.md b/parenet_protein/README.md
+new file mode 100644
+index 0000000..23a28ea
+--- /dev/null
++++ b/parenet_protein/README.md
+@@ -0,0 +1,95 @@
++# PARE-Net protein density-point-cloud adapter
++
++This directory adapts upstream [PARE-Net](https://github.com/yaorz97/PARENet) to register a simulated single-chain density point cloud against the complete protein or complex density point cloud stored under `dataset/`.
++
++## Task definition
++
++For each valid chain:
++
++- reference: `<case>/<case>_tgt_2.00.txt`
++- source: `<case>/<case>_model*_chain*_src_2.00.txt`
++- output: a rigid `4 x 4` transform mapping the augmented source into the reference coordinate system
++
++Coordinates stay in Angstroms. During training, the source is rotated around its centroid, translated by up to 30 Angstrom per axis, optionally thinned, and perturbed by coordinate noise. The inverse augmentation is supplied as the ground-truth transform.
++
++Cases, rather than individual chains, are assigned to train/validation/test splits. This prevents different chains sharing the same complete target map from leaking across splits.
++
++## Install the experiment into PARE-Net
++
++From the root of this repository:
++
++```bash
++bash parenet_protein/install_into_parenet.sh
++```
++
++The script clones PARE-Net to `external/PARENet` when needed and creates:
++
++```text
++external/PARENet/experiments/ProteinFit/
++```
++
++It reuses the upstream `model.py`, `backbone.py`, and `trainval.py`, while installing protein-specific data, configuration, loss, inspection, and testing files.
++
++## Install upstream dependencies
++
++Use the environment versions recommended by upstream PARE-Net. From `external/PARENet`:
++
++```bash
++pip install -r requirements.txt
++python setup.py build develop
++cd pareconv/extentions/pointops
++python setup.py install
++```
++
++PARE-Net's CUDA extensions must match the PyTorch/CUDA environment on the training server.
++
++## Inspect data and create a fixed split file
++
++```bash
++cd external/PARENet/experiments/ProteinFit
++python inspect_dataset.py \
++  --dataset_root ../../../dataset \
++  --write_splits ../../../parenet_protein/protein_splits.json
++```
++
++The inspection reports valid cases, valid chain pairs, point-count ranges, skipped files, identity overlap, and the numerical inverse-transform error.
++
++To force training and testing to use the saved split:
++
++```bash
++export PROTEINFIT_SPLIT_FILE="$(realpath ../../../parenet_protein/protein_splits.json)"
++```
++
++## Train
++
++```bash
++cd external/PARENet/experiments/ProteinFit
++export PROTEINFIT_DATASET_ROOT="$(realpath ../../../dataset)"
++CUDA_VISIBLE_DEVICES=0 python trainval.py
++```
++
++The initial settings are deliberately conservative for 2 Angstrom density samples:
++
++- stage voxel scales: approximately 2, 4, and 8 Angstrom
++- ground-truth node radius: 4 Angstrom
++- fine positive radius: 3 Angstrom
++- fine negative radius: 8 Angstrom
++- validation/test augmentation: deterministic
++- minimum source points: 128
++- minimum target points: 256
++
++## Test
++
++Use a snapshot produced by training:
++
++```bash
++CUDA_VISIBLE_DEVICES=0 python test.py \
++  --benchmark test \
++  --snapshot ../../output/ProteinFit/snapshots/<snapshot>.pth.tar
++```
++
++Per-chain results are saved under `external/PARENet/output/ProteinFit/features/test/`.
++
++## Important limitations
++
++The repository currently contains only a small number of protein cases. This is enough for parser, transform-direction, overfitting, and pipeline validation, but not for a final generalizable model. Random rotations create pose diversity, not structural diversity. Expand the training set and split it by sequence/structure homology before reporting benchmark performance.
+diff --git a/parenet_protein/install_into_parenet.sh b/parenet_protein/install_into_parenet.sh
+new file mode 100755
+index 0000000..ce15708
+--- /dev/null
++++ b/parenet_protein/install_into_parenet.sh
+@@ -0,0 +1,26 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
++PARENET_DIR="${1:-${REPO_ROOT}/external/PARENet}"
++ADAPTER_DIR="${REPO_ROOT}/parenet_protein/ProteinFit"
++DEST_DIR="${PARENET_DIR}/experiments/ProteinFit"
++
++if [[ ! -d "${PARENET_DIR}/.git" ]]; then
++  mkdir -p "$(dirname "${PARENET_DIR}")"
++  git clone https://github.com/yaorz97/PARENet.git "${PARENET_DIR}"
++fi
++
++mkdir -p "${DEST_DIR}"
++cp "${PARENET_DIR}/experiments/3DMatch/model.py" "${DEST_DIR}/model.py"
++cp "${PARENET_DIR}/experiments/3DMatch/backbone.py" "${DEST_DIR}/backbone.py"
++cp "${PARENET_DIR}/experiments/3DMatch/trainval.py" "${DEST_DIR}/trainval.py"
++cp "${ADAPTER_DIR}/config.py" "${DEST_DIR}/config.py"
++cp "${ADAPTER_DIR}/dataset.py" "${DEST_DIR}/dataset.py"
++cp "${ADAPTER_DIR}/loss.py" "${DEST_DIR}/loss.py"
++cp "${ADAPTER_DIR}/inspect_dataset.py" "${DEST_DIR}/inspect_dataset.py"
++cp "${ADAPTER_DIR}/test.py" "${DEST_DIR}/test.py"
++
++echo "Installed ProteinFit experiment at: ${DEST_DIR}"
++echo "Dataset default: ${REPO_ROOT}/dataset"
++echo "Next: cd ${PARENET_DIR} && follow upstream installation instructions."
